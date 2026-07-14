@@ -1,0 +1,64 @@
+{
+  "summary": "Backend + Frontend tested for WEFT AI Fabric Design Search. 18/19 backend pytest cases pass. Frontend loads correctly, login works, home screen shows admin stats block, text-search filters UNI-001 to exactly 1 result, Scan tab opens camera view with permission gracefully handled, catalogs tab shows seeded 'Spring / Summer Uniforms 2026' with 8 designs, admin tab & tab bar (Home/Catalogs/Saved/Admin) render. One backend edge-case: self-similarity via seeded thumbnail returns correct top-1 identity but similarity=0.84 (< spec-requested 0.9) due to embed_query_multi averaging blur/rotate/autocontrast variants over JPEG-compressed thumbnail. Minor RN web deprecation warnings observed: shadow* style props and props.pointerEvents.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/search/similar",
+        "issue": "When querying with the seeded design's own JPEG thumbnail (as spec requires), top-1 identity is correct but similarity comes back ~0.84 instead of the requested >=0.9. Cause: embed_query_multi averages base + GaussianBlur + ±8° rotation + autocontrast variants; averaging over 5 non-identical variants + JPEG compression of the thumbnail (quality=78) reduces the self-cosine below 0.9. When querying with the original PNG image (not thumbnail) similarity stays high. Recommendation: skip the query-augmentation and JPEG round-trip in the self-test path, or lower the spec threshold to ~0.8 to reflect real query augmentation."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "global",
+        "issues": [
+          "RN Web console warning: 'shadow*' style props are deprecated. Use style.boxShadow (cosmetic, appears on many screens).",
+          "RN Web console warning: 'props.pointerEvents is deprecated. Use style.pointerEvents' (cosmetic)."
+        ]
+      }
+    ],
+    "react_native_issues": [
+      {
+        "component": "shadow* style props",
+        "issue": "Multiple components use deprecated shadow* style props on RN Web. Migrate to style.boxShadow to silence warnings. Reference: search StyleSheet usages of shadowColor/shadowOffset/shadowOpacity/shadowRadius under /app/frontend/app/**."
+      },
+      {
+        "component": "pointerEvents prop",
+        "issue": "Some component passes pointerEvents as a prop; RN deprecates this — use style.pointerEvents. Reference: /app/frontend/app/(app)/**."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Adjust POST /api/search/similar behaviour or spec threshold: either drop augmentation when the input is already a low-res thumbnail (or compute a light-augment-free path) OR keep behaviour and treat 0.8+ as the self-match threshold. Top-1 identity ranking already works correctly.",
+    "Migrate deprecated RN Web shadow* style props to boxShadow across styled components.",
+    "Move pointerEvents from prop to style to remove the deprecation warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py stats endpoint scans all designs sequentially to compute storage_bytes and duplicates each request; O(N^2) duplicate estimate. Fine for MVP (<1000 designs) but should be moved off request path or cached for scale.",
+    "server.py /api/admin/regenerate-embeddings re-encodes every image synchronously in the request; consider background task for production.",
+    "auth.py uses HTTPBearer with auto_error=False and manually raises 401 — good pattern; JWT_SECRET falls back to 'dev-secret-change-me' — production should hard-fail without env.",
+    "similarity.py has a dead assignment to 'hist' (line ~102) before it's overwritten by 'out'; the first ang/hist computation is unused — minor.",
+    "No pagination on /api/designs (limit up to 500) and /api/search/similar loads full corpus into memory (to_list 100000) — acceptable for MVP but flag for scale.",
+    "server.py: no MongoDB _id leaks confirmed via test_no_underscore_id recursive assertion across all response types (pass)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (new)"
+  ],
+  "success_rate": {
+    "backend": "94.7% (18/19)",
+    "frontend": "100% for verified flows (login, home, text-search UNI-001 filter, scan open+close, catalogs, tab bar)"
+  },
+  "seed_data_creation": "None created directly; test suite creates transient TEST_ prefixed catalog+design in TestCRUDCycle and cleans up in same test. TestAuth.test_register_as_admin_creates_manager leaves one TEST_<uuid>@fabric.app manager user behind each run — safe (idempotent email uniqueness) but consider cleanup fixture if this suite is run repeatedly.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend suite lives at /app/backend/tests/backend_test.py. Run: EXPO_PUBLIC_BACKEND_URL=<url> pytest backend/tests/backend_test.py -v. The only failing test is TestSearch::test_similar_returns_top20_with_high_top1 which fails on the similarity threshold, not identity. Fix path is either code (skip augmentation for thumbnails) or spec (accept 0.8+ threshold) — this is a design choice for the main agent.",
+  "rca_of_issue": "TestSearch::test_similar_returns_top20_with_high_top1 fails at assert similarity>=0.9. RCA: (1) Seeded designs store embeddings computed from the ORIGINAL 256x256 PNG via embed_image_b64. (2) The thumbnail returned by GET /api/designs is a NEW JPEG (quality 78) re-encoded from the same image via make_thumbnail_b64 (side 256). (3) The test queries POST /api/search/similar with that JPEG thumbnail. (4) embed_query_multi averages FIVE variants (base + GaussianBlur radius 1.2 + rotate +8° + rotate -8° + autocontrast). Averaging rotation/blur/contrast variants shifts the resulting embedding away from the exact stored PNG-based embedding by ~0.15 cosine, yielding sim≈0.84. Top-1 identity still ranks correctly. Mitigation options: (a) In embed_query_multi, skip augmentation if image side < 300px OR add un-augmented base vector with heavier weight; (b) Lower spec threshold to 0.8; (c) Use image (not thumbnail) as query in that particular test scenario."
+}

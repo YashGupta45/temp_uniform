@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "frontend",
+    "name": "WEFT AI",
     "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,7 +10,11 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.designsearch.qy2w6p"
+      "bundleIdentifier": "com.emergent.designsearch.qy2w6p",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Photograph fabric swatches to find matches",
+        "NSPhotoLibraryUsageDescription": "Pick a swatch photo to search catalogs"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +22,12 @@
         "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.designsearch.qy2w6p"
+      "package": "com.emergent.designsearch.qy2w6p",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -34,6 +43,20 @@
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#000000"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Photograph fabric swatches to find matches",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Pick a swatch photo to search catalogs"
         }
       ]
     ],
