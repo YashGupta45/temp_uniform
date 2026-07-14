@@ -1,0 +1,136 @@
+{
+  "theme_preference": "light_mode_default_with_dark_toggle",
+  "design_concept": {
+    "identity": "Industrial Editorial (Swiss Brutalist + Tech Camera UI)",
+    "description": "Fusing the raw, high-tech precision of a modern AI scanner (crosshairs, bounding boxes, mono-spaced data, signal accents) with the tactile, elegant world of fashion and textile lookbooks (clean typography, generous whitespace, large imagery).",
+    "emotion": "Precision, reliability, authority, and modern efficiency."
+  },
+  "typography": {
+    "strategy": "The 'Editorial Future' mix.",
+    "fonts": {
+      "headings": "Outfit, sans-serif (Bold, structural, industrial)",
+      "body": "Manrope, sans-serif (Clean, readable at small sizes)",
+      "mono": "JetBrains Mono, monospace (Used ONLY for AI similarity percentages, design numbers, and camera overlay data)"
+    },
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl font-light tracking-tighter leading-none",
+      "h2": "text-2xl sm:text-3xl font-medium tracking-tight",
+      "h3": "text-xl font-medium tracking-tight",
+      "body": "text-base leading-relaxed",
+      "overline": "text-xs font-mono uppercase tracking-[0.2em] font-medium",
+      "ai_metric": "text-sm font-mono tracking-wider"
+    },
+    "imports": [
+      "@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');"
+    ]
+  },
+  "colors": {
+    "archetype": "Swiss & High-Contrast (Archetype 4)",
+    "palette": {
+      "light_mode": {
+        "background": "#FAFAFA",
+        "surface": "#FFFFFF",
+        "surface_glass": "rgba(255, 255, 255, 0.7)",
+        "text_primary": "#0A0A0A",
+        "text_secondary": "#52525B",
+        "border": "#E4E4E7",
+        "primary_accent": "#002FA7",
+        "warning_scan": "#FF3B30",
+        "success_match": "#10B981"
+      },
+      "dark_mode": {
+        "background": "#0A0A0A",
+        "surface": "#18181B",
+        "surface_glass": "rgba(10, 10, 10, 0.6)",
+        "text_primary": "#FAFAFA",
+        "text_secondary": "#A1A1AA",
+        "border": "#27272A",
+        "primary_accent": "#3B82F6",
+        "warning_scan": "#FF453A",
+        "success_match": "#10B981"
+      }
+    },
+    "usage_rules": [
+      "No full-screen gradients. Use solid colors with high contrast.",
+      "Primary Accent (Klein Blue) should be used strictly for primary CTA buttons and active states.",
+      "Warning Scan (Signal Red) is reserved for the AI scanner bounding box, crosshairs, and live recording indicators.",
+      "Never use pure black or pure white; always tint slightly for optical comfort."
+    ]
+  },
+  "grids_and_layouts": {
+    "global_spacing": "Use p-6 to p-8 for main screen wrappers. The design must feel breathable.",
+    "mobile_first": "Assume a mobile-first viewport (PWA/hybrid app style). Constrain max-width on desktop to 480px for the app view, or use a multi-pane split for the Admin Dashboard.",
+    "bento_grid": "For the Admin dashboard, use 'High Density Grid' (gap-4, strict row/col spans) to pack catalog and user stats.",
+    "search_results": "Grid layout (grid-cols-2). 'Cardless' look. Images must go edge-to-edge within their grid cells, separated only by thin 1px borders (Grid Borders technical look)."
+  },
+  "component_guidelines": {
+    "buttons": "Pill-shaped (rounded-full) for primary actions. Sharp edges (rounded-none) for catalog filters and admin controls.",
+    "bottom_navigation": "Crystal Glassmorphism variant. backdrop-blur-xl, saturate-150, bg-white/70, with a delicate 1px border-t. Must sit at z-50.",
+    "camera_scanner_view": "Full bleed image representing the camera feed. Center overlay a 'focus bracket' (4 corners, 2px border, Signal Red). Use a sweeping linear gradient line for the scanning animation.",
+    "cards": "For the app, use flat solid backgrounds with 1px borders. NO soft shadows. If it's a catalog item, omit the card wrapper entirely and just show the image + text directly (cardless).",
+    "similarity_badge": "Float this at the top right of result images. Use font-mono, bright background (e.g., solid black with white text, or pure blue).",
+    "inputs_and_forms": "Shadcn components heavily customized: 0px border radius (sharp), 1px solid border, floating labels if possible, high contrast focus states (focus:ring-2 focus:ring-blue-600)."
+  },
+  "motion_and_interactions": {
+    "hover_states": "All interactive elements MUST have a hover state. Buttons should translate-y-[-1px] and increase shadow/opacity.",
+    "scanner_animation": "Use Framer Motion to create a laser-scan effect: a horizontal 1px line moving up and down the image bounds infinitely.",
+    "page_transitions": "Subtle fade-in and slide-up (translate-y-4 to 0, opacity 0 to 1) for lists and grids.",
+    "accessibility": "Respect prefers-reduced-motion. Ensure active states don't rely solely on color change (add a border or scale shift)."
+  },
+  "media_and_icons": {
+    "icon_library": "lucide-react (Standard, clear, and geometric)",
+    "image_styling": "Images must have max-h-[80vh] on detail screens to prevent infinite scrolling. Use object-cover for catalog thumbnails.",
+    "overlays": "When text sits on an image (e.g., hero or camera), use a gradient scrim (bg-gradient-to-t from-black/60 to-transparent) on the bottom 30% only. Do not blanket-dim the whole image."
+  },
+  "image_urls": {
+    "fabric_catalogs": [
+      {
+        "url": "https://images.unsplash.com/photo-1701964620963-4dcaab6d020f",
+        "description": "Fabric with design - Use as the target scan image or top search result"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1701964620877-5653b8a7280e",
+        "description": "Floral rug - Use as a similar search result (e.g., 94% match)"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1701964619775-b18422290cf9",
+        "description": "Black and white pattern - Use as a catalog item"
+      }
+    ],
+    "admin_dashboard_backgrounds": [
+      {
+        "url": "https://images.unsplash.com/photo-1610891015188-5369212db097?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzF8MHwxfHNlYXJjaHwzfHx0ZXh0aWxlJTIwbWFudWZhY3R1cmluZ3xlbnwwfHx8fDE3ODQwMjE2NTl8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Textile factory machinery - Use for admin login background or dashboard header banner"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1517146783983-418c681b56c5?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzF8MHwxfHNlYXJjaHw0fHx0ZXh0aWxlJTIwbWFudWZhY3R1cmluZ3xlbnwwfHx8fDE3ODQwMjE2NTl8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Thread spools - Use for category covers or decorative elements"
+      }
+    ],
+    "empty_states": [
+      {
+        "url": "https://images.unsplash.com/photo-1523901839036-a3030662f220?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzh8MHwxfHNlYXJjaHwxfHx0YWlsb3IlMjBtZWFzdXJpbmclMjBjbG90aHxlbnwwfHx8fDE3ODQwMjE2NTl8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Tailor measuring tape - Use for empty states, 'no results found', or onboarding screens"
+      }
+    ]
+  },
+  "instructions_to_main_agent": {
+    "setup": "Build a responsive web app that mimics a high-end mobile application. Use a constrained max-width container (e.g., max-w-md mx-auto relative) for the primary mobile views, and a standard dashboard layout for the Admin section.",
+    "camera_simulation": "Since real camera APIs won't work in this static web view, simulate the scanner by placing a static fabric image (from image_urls) full screen, overlay a targeting reticle, a scanning line animation, and mock UI controls (Torch, Switch Camera, Cancel).",
+    "routing_state": "Use React state or standard router to manage navigation between: Home, Scanner View, Results List, Result Detail, and Admin Dashboard.",
+    "data_mocking": "Create robust mock data for the Top 20 results, ensuring they include fields: similarity_percentage, design_number, catalog, color, brand. Render the list with Framer Motion stagger effects.",
+    "accessibility": "Ensure contrast meets WCAG AA standards. Include data-testid attributes on all interactive elements (e.g., data-testid='camera-capture-btn')."
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "DO NOT use dark colors as gradients. Dark colors look good when used independently.",
+    "Don't make generic centered layouts. Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur) for sticky navs and overlays. DO NOT use completely transparent backgrounds for elements with content underneath.",
+    "You MUST NOT apply universal transitions (e.g., transition: all). Add transitions for specific properties.",
+    "You MUST NOT center align the app container using text-align: center globally.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "All interactive and key informational elements MUST include a data-testid attribute to facilitate robust automated testing.",
+    "NEVER use placeholder URLs (via.placeholder.com). Use only the provided Unsplash images in the image_urls section.",
+    "For toasts, use the 'sonner' library if available."
+  ]
+}
