@@ -175,19 +175,23 @@ def embed_image_b64(b64_data: str) -> List[float]:
 
 
 def embed_query_multi(b64_data: str) -> List[float]:
-    """For the search query, generate embeddings from the original + a
-    lightly blurred + a rotated variant and average them.  This absorbs
-    small blur / rotation / lighting differences at query time."""
+    """For the search query, generate embeddings from the original + a few
+    lightly perturbed variants and take a weighted average.  The base image
+    is weighted 5x heavier than each perturbation so identity matches stay
+    close to 1.0 while blur / rotation / lighting robustness is preserved."""
     base = load_image(b64_data)
-    variants: List[Image.Image] = [base]
-    variants.append(base.filter(ImageFilter.GaussianBlur(radius=1.2)))
-    variants.append(base.rotate(8, resample=Image.BILINEAR, expand=False))
-    variants.append(base.rotate(-8, resample=Image.BILINEAR, expand=False))
-    variants.append(ImageOps.autocontrast(base, cutoff=2))
+    variants: List[Tuple[Image.Image, float]] = [
+        (base, 5.0),
+        (base.filter(ImageFilter.GaussianBlur(radius=1.2)), 1.0),
+        (base.rotate(6, resample=Image.BILINEAR, expand=False), 1.0),
+        (base.rotate(-6, resample=Image.BILINEAR, expand=False), 1.0),
+        (ImageOps.autocontrast(base, cutoff=2), 1.0),
+    ]
 
-    vecs = []
-    for v in variants:
-        fabric = _isolate_fabric_region(v)
+    weighted = np.zeros(EMBEDDING_DIMS, dtype=np.float32)
+    total_w = 0.0
+    for img, w in variants:
+        fabric = _isolate_fabric_region(img)
         parts = [
             _hsv_histogram(fabric) * 0.30,
             _phash_bits(fabric) * 0.20,
@@ -195,8 +199,9 @@ def embed_query_multi(b64_data: str) -> List[float]:
             _lbp_hist(fabric) * 0.14,
             _patch_color_stats(fabric) * 0.08,
         ]
-        vecs.append(np.concatenate(parts).astype(np.float32))
-    avg = np.mean(np.stack(vecs, axis=0), axis=0)
+        weighted += np.concatenate(parts).astype(np.float32) * w
+        total_w += w
+    avg = weighted / max(total_w, 1e-9)
     return _l2(avg).tolist()
 
 
