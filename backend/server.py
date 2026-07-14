@@ -9,7 +9,7 @@ from typing import List, Optional
 import uuid
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -57,6 +57,8 @@ from similarity import (  # noqa: E402
     make_thumbnail_b64,
     rank_top_k,
 )
+from pdf_import import commit_job as pdf_commit_job  # noqa: E402
+from pdf_import import process_pdf_job  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("fabric-api")
@@ -600,3 +602,153 @@ async def regenerate_embeddings(
         except Exception as e:  # pragma: no cover
             logger.warning("Skip %s: %s", d.get("id"), e)
     return {"updated": updated}
+
+
+# =========================================================================
+#                               PDF IMPORT
+# =========================================================================
+@app.post("/api/admin/pdf-import/start")
+async def pdf_import_start(
+    background_tasks: BackgroundTasks,
+    catalog_id: str = Form(...),
+    use_ai_ocr: bool = Form(True),
+    pdf: UploadFile = File(...),
+    user: UserPublic = Depends(require_role("manager")),
+):
+    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a .pdf")
+    catalog = await db.catalogs.find_one({"id": catalog_id}, {"_id": 0, "id": 1, "name": 1})
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+    data = await pdf.read()
+    if len(data) < 200 or not data.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="Invalid PDF")
+    if len(data) > 60 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="PDF too large (max 60 MB)")
+
+    job_id = str(uuid.uuid4())
+    await db.pdf_import_jobs.insert_one({
+        "id": job_id,
+        "catalog_id": catalog_id,
+        "catalog_name": catalog["name"],
+        "filename": pdf.filename,
+        "size_bytes": len(data),
+        "status": "queued",
+        "progress": 0.0,
+        "total_pages": 0,
+        "item_count": 0,
+        "pages": [],
+        "use_ai_ocr": use_ai_ocr,
+        "created_by": user.id,
+        "created_at": datetime.now(timezone.utc),
+    })
+
+    background_tasks.add_task(
+        process_pdf_job, db, job_id, catalog_id, data, use_ai_ocr,
+    )
+    return {"job_id": job_id, "status": "queued", "size_bytes": len(data)}
+
+
+@app.get("/api/admin/pdf-import/{job_id}")
+async def pdf_import_status(
+    job_id: str,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    job = await db.pdf_import_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.get("/api/admin/pdf-import/{job_id}/items")
+async def pdf_import_items(
+    job_id: str,
+    page_index: Optional[int] = None,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    q: dict = {"job_id": job_id}
+    if page_index is not None:
+        q["page_index"] = page_index
+    docs = await db.pdf_import_items.find(
+        q, {"_id": 0, "image": 0}  # keep response light; use /image endpoint for full
+    ).sort([("page_index", 1), ("cell_index", 1)]).to_list(10000)
+    return docs
+
+
+@app.patch("/api/admin/pdf-import/{job_id}/items/{item_id}")
+async def pdf_import_patch_item(
+    job_id: str,
+    item_id: str,
+    payload: dict,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    allowed = {"edited_number", "pattern", "color", "skip", "printed_page_number"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No allowed fields to update")
+    r = await db.pdf_import_items.update_one(
+        {"id": item_id, "job_id": job_id}, {"$set": updates}
+    )
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"updated": True}
+
+
+@app.patch("/api/admin/pdf-import/{job_id}/page/{page_index}")
+async def pdf_import_patch_page(
+    job_id: str,
+    page_index: int,
+    payload: dict,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    """Bulk-apply a field (pattern, printed_page_number, skip) to all items on a page."""
+    allowed = {"pattern", "color", "skip", "printed_page_number"}
+    updates = {k: v for k, v in payload.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No allowed fields to update")
+    r = await db.pdf_import_items.update_many(
+        {"job_id": job_id, "page_index": page_index},
+        {"$set": updates},
+    )
+    return {"updated": r.modified_count}
+
+
+@app.post("/api/admin/pdf-import/{job_id}/commit")
+async def pdf_import_commit(
+    job_id: str,
+    user: UserPublic = Depends(require_role("manager")),
+):
+    job = await db.pdf_import_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] not in ("ready", "ocr"):
+        raise HTTPException(status_code=400, detail=f"Job not ready (status={job['status']})")
+    try:
+        result = await pdf_commit_job(db, job_id, job["catalog_id"], user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@app.delete("/api/admin/pdf-import/{job_id}")
+async def pdf_import_delete(
+    job_id: str,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    await db.pdf_import_items.delete_many({"job_id": job_id})
+    await db.pdf_import_jobs.delete_one({"id": job_id})
+    return {"deleted": True}
+
+
+@app.get("/api/admin/pdf-import/{job_id}/items/{item_id}/image")
+async def pdf_import_item_image(
+    job_id: str,
+    item_id: str,
+    _user: UserPublic = Depends(require_role("manager")),
+):
+    it = await db.pdf_import_items.find_one(
+        {"id": item_id, "job_id": job_id}, {"_id": 0, "image": 1}
+    )
+    if not it:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"image": it.get("image", "")}

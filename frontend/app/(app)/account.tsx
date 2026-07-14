@@ -112,6 +112,12 @@ export default function AccountScreen() {
               onPress={() => router.push("/(app)/admin/add-design")}
             />
             <ActionRow
+              testID="nav-pdf-import"
+              icon="cloud-upload-outline"
+              label="Bulk import from PDF"
+              onPress={() => router.push("/(app)/admin/pdf-import")}
+            />
+            <ActionRow
               testID="nav-duplicates"
               icon="git-compare-outline"
               label="Duplicate detection"
