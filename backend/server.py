@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 import uuid
 
+import numpy as np
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,7 @@ from similarity import (  # noqa: E402
     embed_image_b64,
     embed_query_multi,
     make_thumbnail_b64,
+    pairwise_similarity,
     rank_top_k,
 )
 from pdf_import import commit_job as pdf_commit_job  # noqa: E402
@@ -68,7 +70,7 @@ app = FastAPI(title="AI Fabric Design Search API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # bearer tokens in headers; "*" + credentials is disallowed by the CORS spec
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -77,6 +79,38 @@ app.add_middleware(
 def _strip_mongo(doc: dict) -> dict:
     doc.pop("_id", None)
     return doc
+
+
+# ---------------------- embedding cache ---------------------------------- #
+# The similarity corpus (id + 182-dim vector per design) is kept in RAM and
+# refreshed lazily. Previously EVERY search pulled all ~5000 full design docs
+# (thumbnails included) out of Mongo — easily tens of MB per query. Now a
+# search touches the DB only for the top-k winners.
+_emb_cache: dict = {"ids": [], "matrix": None, "dirty": True}
+
+
+def invalidate_embedding_cache() -> None:
+    _emb_cache["dirty"] = True
+
+
+async def _get_corpus():
+    """Return (ids, matrix) of all design embeddings, loading only the two
+    fields needed and caching the numpy matrix between requests."""
+    if _emb_cache["dirty"]:
+        ids: list = []
+        vecs: list = []
+        async for d in db.designs.find(
+            {"embedding.0": {"$exists": True}}, {"_id": 0, "id": 1, "embedding": 1}
+        ):
+            ids.append(d["id"])
+            vecs.append(d["embedding"])
+        _emb_cache["ids"] = ids
+        _emb_cache["matrix"] = (
+            np.asarray(vecs, dtype=np.float32) if vecs else None
+        )
+        _emb_cache["dirty"] = False
+    return _emb_cache["ids"], _emb_cache["matrix"]
+
 
 
 async def _record_search(user_id: str, query_type: str, query_text: str,
@@ -252,6 +286,7 @@ async def delete_catalog(
     _admin: UserPublic = Depends(require_role("admin")),
 ):
     await db.designs.delete_many({"catalog_id": catalog_id})
+    invalidate_embedding_cache()
     r = await db.catalogs.delete_one({"id": catalog_id})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Catalog not found")
@@ -293,6 +328,7 @@ async def create_design(
     doc["embedding"] = embedding
     await db.designs.insert_one(doc)
     await db.catalogs.update_one({"id": payload.catalog_id}, {"$inc": {"design_count": 1}})
+    invalidate_embedding_cache()
     doc.pop("embedding", None)
     return Design(**doc)
 
@@ -335,6 +371,8 @@ async def update_design(
     r = await db.designs.update_one({"id": design_id}, {"$set": updates})
     if r.matched_count == 0:
         raise HTTPException(status_code=404, detail="Design not found")
+    if "embedding" in updates:
+        invalidate_embedding_cache()
     doc = await db.designs.find_one({"id": design_id}, {"_id": 0, "embedding": 0})
     return Design(**doc)
 
@@ -349,6 +387,7 @@ async def delete_design(
         raise HTTPException(status_code=404, detail="Design not found")
     await db.designs.delete_one({"id": design_id})
     await db.catalogs.update_one({"id": doc["catalog_id"]}, {"$inc": {"design_count": -1}})
+    invalidate_embedding_cache()
     return {"deleted": True}
 
 
@@ -366,24 +405,26 @@ async def search_similar(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Bad image data: {e}")
 
-    docs = await db.designs.find({}, {
-        "_id": 0, "image": 0,  # image is heavy; we'll return only thumbnail
-    }).to_list(5000)
-    if not docs:
+    # Phase 1: rank against the in-memory embedding matrix (no doc I/O).
+    ids, matrix = await _get_corpus()
+    if matrix is None:
         return []
 
-    corpus_vecs = [d.get("embedding") or [] for d in docs]
-    # Filter out any designs missing embeddings (shouldn't happen)
-    valid_idx = [i for i, v in enumerate(corpus_vecs) if v]
-    corpus_vecs = [corpus_vecs[i] for i in valid_idx]
-    docs = [docs[i] for i in valid_idx]
+    ranked = rank_top_k(q_vec, matrix, top_k=req.top_k)
+    ranked = [(i, s) for i, s in ranked if s >= req.min_similarity]
+    sim_by_id = {ids[i]: s for i, s in ranked}
 
-    ranked = rank_top_k(q_vec, corpus_vecs, top_k=req.top_k)
+    # Phase 2: fetch full metadata for ONLY the winners.
+    docs = await db.designs.find(
+        {"id": {"$in": list(sim_by_id)}}, {"_id": 0, "image": 0, "embedding": 0}
+    ).to_list(len(sim_by_id) or 1)
+    doc_by_id = {d["id"]: d for d in docs}
+
     results: List[DesignSearchResult] = []
-    for idx, sim in ranked:
-        if sim < req.min_similarity:
-            continue
-        d = docs[idx]
+    for i, sim in ranked:
+        d = doc_by_id.get(ids[i])
+        if not d:
+            continue  # deleted between cache refresh and now
         results.append(DesignSearchResult(
             id=d["id"],
             design_number=d["design_number"],
@@ -399,11 +440,8 @@ async def search_similar(
             similarity=sim,
         ))
 
-    top = None
-    top_sim = 0.0
-    if ranked:
-        top = docs[ranked[0][0]]
-        top_sim = ranked[0][1]
+    top = doc_by_id.get(ids[ranked[0][0]]) if ranked else None
+    top_sim = ranked[0][1] if ranked else 0.0
     await _record_search(user.id, "image", "", q_thumb, top, top_sim)
     return results
 
@@ -444,31 +482,40 @@ async def related_designs(
     top_k: int = 10,
     _user: UserPublic = Depends(current_user),
 ):
-    src = await db.designs.find_one({"id": design_id}, {"_id": 0})
+    src = await db.designs.find_one({"id": design_id}, {"_id": 0, "embedding": 1})
     if not src or not src.get("embedding"):
         raise HTTPException(status_code=404, detail="Design not found")
-    docs = await db.designs.find({"id": {"$ne": design_id}}, {"_id": 0, "image": 0}).to_list(5000)
-    corpus = [d.get("embedding") or [] for d in docs]
-    valid_idx = [i for i, v in enumerate(corpus) if v]
-    corpus = [corpus[i] for i in valid_idx]
-    docs = [docs[i] for i in valid_idx]
-    ranked = rank_top_k(src["embedding"], corpus, top_k=top_k)
+
+    ids, matrix = await _get_corpus()
+    if matrix is None:
+        return []
+    # +1 so we can drop the design itself if it appears in its own results.
+    ranked = [(i, s) for i, s in rank_top_k(src["embedding"], matrix, top_k=top_k + 1)
+              if ids[i] != design_id][:top_k]
+    sim_by_id = {ids[i]: s for i, s in ranked}
+
+    docs = await db.designs.find(
+        {"id": {"$in": list(sim_by_id)}}, {"_id": 0, "image": 0, "embedding": 0}
+    ).to_list(len(sim_by_id) or 1)
+    doc_by_id = {d["id"]: d for d in docs}
+
     return [
         DesignSearchResult(
-            id=docs[i]["id"],
-            design_number=docs[i]["design_number"],
-            catalog_id=docs[i]["catalog_id"],
-            catalog_name=docs[i].get("catalog_name", ""),
-            brand=docs[i].get("brand", ""),
-            page_number=docs[i].get("page_number"),
-            color=docs[i].get("color", ""),
-            pattern=docs[i].get("pattern", ""),
-            tags=docs[i].get("tags", []),
-            remarks=docs[i].get("remarks", ""),
-            thumbnail=docs[i].get("thumbnail", ""),
+            id=d["id"],
+            design_number=d["design_number"],
+            catalog_id=d["catalog_id"],
+            catalog_name=d.get("catalog_name", ""),
+            brand=d.get("brand", ""),
+            page_number=d.get("page_number"),
+            color=d.get("color", ""),
+            pattern=d.get("pattern", ""),
+            tags=d.get("tags", []),
+            remarks=d.get("remarks", ""),
+            thumbnail=d.get("thumbnail", ""),
             similarity=sim,
         )
         for i, sim in ranked
+        if (d := doc_by_id.get(ids[i]))
     ]
 
 
@@ -528,26 +575,28 @@ async def stats(_user: UserPublic = Depends(require_role("manager"))):
     since = datetime.now(timezone.utc) - timedelta(days=7)
     searches_7d = await db.search_history.count_documents({"created_at": {"$gte": since}})
 
-    # Storage estimate = sum of raw image lengths (approx bytes)
+    # Storage estimate: let Mongo sum the string lengths instead of
+    # streaming every full base64 image into the app process.
     total_bytes = 0
-    async for d in db.designs.find({}, {"_id": 0, "image": 1}):
-        total_bytes += len(d.get("image", ""))
-    async for c in db.catalogs.find({}, {"_id": 0, "cover_image": 1}):
-        total_bytes += len(c.get("cover_image") or "")
+    async for r in db.designs.aggregate([
+        {"$project": {"n": {"$strLenBytes": {"$ifNull": ["$image", ""]}}}},
+        {"$group": {"_id": None, "total": {"$sum": "$n"}}},
+    ]):
+        total_bytes += r.get("total", 0)
+    async for r in db.catalogs.aggregate([
+        {"$project": {"n": {"$strLenBytes": {"$ifNull": ["$cover_image", ""]}}}},
+        {"$group": {"_id": None, "total": {"$sum": "$n"}}},
+    ]):
+        total_bytes += r.get("total", 0)
 
-    # rough duplicate estimate (bounded)
+    # Duplicate estimate: one vectorised pass over the cached embedding
+    # matrix (previously an O(n^2) Python loop that rebuilt a numpy array
+    # per design).
+    _ids, matrix = await _get_corpus()
     dup_estimate = 0
-    docs = await db.designs.find({}, {"_id": 0, "id": 1, "embedding": 1}).limit(1000).to_list(1000)
-    seen = set()
-    for i in range(len(docs)):
-        if not docs[i].get("embedding"): continue
-        if docs[i]["id"] in seen: continue
-        ranked = rank_top_k(docs[i]["embedding"],
-                            [d["embedding"] for d in docs if d["id"] != docs[i]["id"] and d.get("embedding")],
-                            top_k=1)
-        if ranked and ranked[0][1] >= 0.96:
-            dup_estimate += 1
-            seen.add(docs[i]["id"])
+    if matrix is not None and len(matrix) > 1:
+        sample = matrix[:2000]  # bound memory for the all-pairs matrix
+        dup_estimate = len({i for i, _j, _s in pairwise_similarity(sample, 0.96)})
 
     return DashboardStats(
         users=users_count,
@@ -564,28 +613,38 @@ async def duplicates(
     threshold: float = 0.94,
     _user: UserPublic = Depends(require_role("manager")),
 ):
-    docs = await db.designs.find({}, {"_id": 0, "embedding": 0 if False else 1,
-                                       "id": 1, "design_number": 1, "thumbnail": 1}).to_list(5000)
+    ids, matrix = await _get_corpus()
+    if matrix is None:
+        return []
+
+    # One matrix multiplication finds every candidate pair; thumbnails are
+    # then fetched only for the designs that actually appear in a pair.
+    raw_pairs = pairwise_similarity(matrix, threshold)[:200]
+    if not raw_pairs:
+        return []
+
+    involved = {ids[i] for i, j, _ in raw_pairs} | {ids[j] for i, j, _ in raw_pairs}
+    docs = await db.designs.find(
+        {"id": {"$in": list(involved)}},
+        {"_id": 0, "id": 1, "design_number": 1, "thumbnail": 1},
+    ).to_list(len(involved))
+    by_id = {d["id"]: d for d in docs}
+
     pairs: List[DuplicatePair] = []
-    for i in range(len(docs)):
-        if not docs[i].get("embedding"): continue
-        rest = docs[i + 1:]
-        vecs = [d.get("embedding") or [] for d in rest]
-        if not vecs: break
-        ranked = rank_top_k(docs[i]["embedding"], vecs, top_k=5)
-        for idx, sim in ranked:
-            if sim >= threshold:
-                b = rest[idx]
-                pairs.append(DuplicatePair(
-                    design_a_id=docs[i]["id"],
-                    design_a_number=docs[i]["design_number"],
-                    design_a_thumb=docs[i].get("thumbnail", ""),
-                    design_b_id=b["id"],
-                    design_b_number=b["design_number"],
-                    design_b_thumb=b.get("thumbnail", ""),
-                    similarity=sim,
-                ))
-    return pairs[:200]
+    for i, j, sim in raw_pairs:
+        a, b = by_id.get(ids[i]), by_id.get(ids[j])
+        if not a or not b:
+            continue
+        pairs.append(DuplicatePair(
+            design_a_id=a["id"],
+            design_a_number=a["design_number"],
+            design_a_thumb=a.get("thumbnail", ""),
+            design_b_id=b["id"],
+            design_b_number=b["design_number"],
+            design_b_thumb=b.get("thumbnail", ""),
+            similarity=sim,
+        ))
+    return pairs
 
 
 @app.post("/api/admin/regenerate-embeddings")
@@ -601,6 +660,7 @@ async def regenerate_embeddings(
             updated += 1
         except Exception as e:  # pragma: no cover
             logger.warning("Skip %s: %s", d.get("id"), e)
+    invalidate_embedding_cache()
     return {"updated": updated}
 
 
@@ -727,6 +787,7 @@ async def pdf_import_commit(
         result = await pdf_commit_job(db, job_id, job["catalog_id"], user.id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    invalidate_embedding_cache()
     return result
 
 
