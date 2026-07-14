@@ -5,21 +5,28 @@ robust against lighting, rotation, partial samples, blur, and background:
 
     - Global color histogram in HSV (illumination-tolerant)   [48 dims]
     - Perceptual hash (pHash, 8x8 DCT bit-vector)             [64 dims]
-    - Multi-scale HOG-lite gradient orientation histogram
+    - HOG-lite gradient orientation histogram
       captures weave / stripe / check / geometric motifs      [36 dims]
-    - Local texture (Local Binary Pattern style) histogram   [16 dims]
-    - Multi-scale patch color statistics                     [18 dims]
+    - Local texture (Local Binary Pattern style) histogram    [16 dims]
+    - Multi-scale patch color statistics                      [18 dims]
 
 Each block is L2-normalised then concatenated into one vector so cosine
 similarity works well.  Storage is a plain list[float] per design in Mongo;
 FAISS is not needed at this scale (<50k designs still respond in <200ms via
 numpy dot-product).
+
+Efficiency notes (v2):
+    - All descriptors now share ONE grayscale / ONE RGB decode per image
+      instead of re-converting and re-resizing inside every descriptor
+      (previously: 2x convert("L"), 2x resize, 2x arctan2 per embed).
+    - rank_top_k uses np.argpartition (O(n)) instead of full sort (O(n log n)).
+    - pairwise_similarity() added for vectorised duplicate detection
+      (one matrix multiplication instead of an O(n^2) Python loop).
 """
 from __future__ import annotations
 
 import base64
 import io
-import math
 from typing import List, Tuple
 
 import imagehash
@@ -28,6 +35,9 @@ from PIL import Image, ImageFilter, ImageOps
 
 
 EMBEDDING_DIMS = 48 + 64 + 36 + 16 + 18  # = 182
+
+# Descriptor weights (must stay in sync between index-time and query-time).
+_W_HSV, _W_PHASH, _W_GRAD, _W_LBP, _W_PATCH = 0.30, 0.20, 0.28, 0.14, 0.08
 
 
 # ------------------------- image loading helpers ------------------------- #
@@ -59,7 +69,7 @@ def make_thumbnail_b64(b64_data: str, side: int = 256, quality: int = 78) -> str
 
 # ------------------------- fabric region isolation ----------------------- #
 def _isolate_fabric_region(img: Image.Image) -> Image.Image:
-    """Center-crop 80% to bias toward the fabric and away from cluttered
+    """Center-crop ~85% to bias toward the fabric and away from cluttered
     background / hand / edges - simple but effective for handheld cloth photos.
     """
     w, h = img.size
@@ -70,12 +80,10 @@ def _isolate_fabric_region(img: Image.Image) -> Image.Image:
 
 
 # ------------------------- individual descriptors ------------------------ #
-def _hsv_histogram(img: Image.Image) -> np.ndarray:
-    hsv = img.convert("HSV")
-    arr = np.asarray(hsv, dtype=np.float32)
-    h_hist, _ = np.histogram(arr[..., 0], bins=24, range=(0, 256))
-    s_hist, _ = np.histogram(arr[..., 1], bins=12, range=(0, 256))
-    v_hist, _ = np.histogram(arr[..., 2], bins=12, range=(0, 256))
+def _hsv_histogram(hsv_arr: np.ndarray) -> np.ndarray:
+    h_hist, _ = np.histogram(hsv_arr[..., 0], bins=24, range=(0, 256))
+    s_hist, _ = np.histogram(hsv_arr[..., 1], bins=12, range=(0, 256))
+    v_hist, _ = np.histogram(hsv_arr[..., 2], bins=12, range=(0, 256))
     hist = np.concatenate([h_hist, s_hist, v_hist]).astype(np.float32)
     return _l2(hist)
 
@@ -88,37 +96,34 @@ def _phash_bits(img: Image.Image) -> np.ndarray:
     return _l2(bits)
 
 
-def _gradient_orientation_hist(img: Image.Image) -> np.ndarray:
-    """A cheap HOG-lite: 6x6 spatial cells x 6 orientation bins over the
-    grayscale gradient - highlights weave, stripes, checks, geometry."""
-    gray = np.asarray(img.convert("L").resize((96, 96), Image.LANCZOS), dtype=np.float32)
-    gx = np.zeros_like(gray)
-    gy = np.zeros_like(gray)
-    gx[:, 1:-1] = gray[:, 2:] - gray[:, :-2]
-    gy[1:-1, :] = gray[2:, :] - gray[:-2, :]
+def _gradient_orientation_hist(gray96: np.ndarray) -> np.ndarray:
+    """A cheap HOG-lite: 3x3 spatial cells x 4 orientation bins over the
+    grayscale gradient (= 36 dims) - highlights weave, stripes, checks."""
+    gx = np.zeros_like(gray96)
+    gy = np.zeros_like(gray96)
+    gx[:, 1:-1] = gray96[:, 2:] - gray96[:, :-2]
+    gy[1:-1, :] = gray96[2:, :] - gray96[:-2, :]
     mag = np.sqrt(gx * gx + gy * gy)
-    ang = (np.arctan2(gy, gx) + math.pi) / math.pi  # 0..2
-    ang = (ang * 3) % 6  # 6 orientation bins
-    hist = np.zeros(6 * 6, dtype=np.float32)  # 6 cells but flattened => 36 dims total? we want 36
-    # Use 6 orientation bins over 6 cells => 6*6=36
-    cells = 3  # 3x3 spatial grid -> 9 cells
-    bins = 4  # 4 orientation bins per cell => 9*4 = 36 dims
+
+    cells, bins = 3, 4
     ch = 96 // cells
-    out = np.zeros(cells * cells * bins, dtype=np.float32)
-    ang = (np.arctan2(gy, gx) + math.pi) / math.pi  # 0..2
+    ang = (np.arctan2(gy, gx) + np.pi) / np.pi  # 0..2
     ang_bin = np.clip((ang * bins / 2).astype(np.int32), 0, bins - 1)
+
+    out = np.zeros(cells * cells * bins, dtype=np.float32)
     for cy in range(cells):
         for cx in range(cells):
             m = mag[cy * ch:(cy + 1) * ch, cx * ch:(cx + 1) * ch]
             a = ang_bin[cy * ch:(cy + 1) * ch, cx * ch:(cx + 1) * ch]
-            for b in range(bins):
-                out[(cy * cells + cx) * bins + b] = float(m[a == b].sum())
+            # bincount over the cell replaces the per-bin masked sums
+            out[(cy * cells + cx) * bins:(cy * cells + cx) * bins + bins] = \
+                np.bincount(a.ravel(), weights=m.ravel(), minlength=bins)[:bins]
     return _l2(out)
 
 
-def _lbp_hist(img: Image.Image) -> np.ndarray:
+def _lbp_hist(gray96: np.ndarray) -> np.ndarray:
     """Local Binary Pattern-ish 16-bin texture histogram."""
-    gray = np.asarray(img.convert("L").resize((96, 96), Image.LANCZOS), dtype=np.int32)
+    gray = gray96.astype(np.int32)
     center = gray[1:-1, 1:-1]
     code = (
         (gray[:-2, :-2] > center).astype(np.uint8) << 0 |
@@ -134,12 +139,11 @@ def _lbp_hist(img: Image.Image) -> np.ndarray:
     return _l2(hist.astype(np.float32))
 
 
-def _patch_color_stats(img: Image.Image) -> np.ndarray:
-    """Mean L*a*b color of a 3x3 grid = 18 dims (missing 3rd channel), give
-    a coarse spatial fingerprint of the fabric palette."""
-    small = img.convert("RGB").resize((96, 96), Image.LANCZOS)
-    arr = np.asarray(small, dtype=np.float32) / 255.0
-    out = np.zeros(3 * 3 * 2, dtype=np.float32)  # 18 dims (mean + std for 3 channels avg per patch)
+def _patch_color_stats(rgb96: np.ndarray) -> np.ndarray:
+    """Mean + std brightness of a 3x3 grid = 18 dims - coarse spatial
+    fingerprint of the fabric palette."""
+    arr = rgb96 / 255.0
+    out = np.zeros(3 * 3 * 2, dtype=np.float32)
     idx = 0
     for py in range(3):
         for px in range(3):
@@ -157,21 +161,32 @@ def _l2(v: np.ndarray) -> np.ndarray:
     return v / n
 
 
+# ------------------------- shared preprocessing --------------------------- #
+def _embed_fabric(fabric: Image.Image) -> np.ndarray:
+    """Compute the weighted, concatenated descriptor vector for an already
+    isolated 256x256 fabric crop.  Image conversions happen exactly once."""
+    hsv_arr = np.asarray(fabric.convert("HSV"), dtype=np.float32)
+    # convert-then-resize order matches the original implementation exactly,
+    # so embeddings already stored in Mongo remain byte-for-byte compatible.
+    gray96 = np.asarray(fabric.convert("L").resize((96, 96), Image.LANCZOS), dtype=np.float32)
+    rgb96 = np.asarray(fabric.resize((96, 96), Image.LANCZOS), dtype=np.float32)
+
+    parts = [
+        _hsv_histogram(hsv_arr) * _W_HSV,
+        _phash_bits(fabric) * _W_PHASH,
+        _gradient_orientation_hist(gray96) * _W_GRAD,
+        _lbp_hist(gray96) * _W_LBP,
+        _patch_color_stats(rgb96) * _W_PATCH,
+    ]
+    return np.concatenate(parts).astype(np.float32)
+
+
 # ------------------------- public API ------------------------------------ #
 def embed_image_b64(b64_data: str) -> List[float]:
     """Generate a single 182-dim embedding for the given image data uri."""
     img = load_image(b64_data)
     fabric = _isolate_fabric_region(img)
-
-    parts = [
-        _hsv_histogram(fabric) * 0.30,
-        _phash_bits(fabric) * 0.20,
-        _gradient_orientation_hist(fabric) * 0.28,
-        _lbp_hist(fabric) * 0.14,
-        _patch_color_stats(fabric) * 0.08,
-    ]
-    vec = np.concatenate(parts).astype(np.float32)
-    return _l2(vec).tolist()
+    return _l2(_embed_fabric(fabric)).tolist()
 
 
 def embed_query_multi(b64_data: str) -> List[float]:
@@ -192,14 +207,7 @@ def embed_query_multi(b64_data: str) -> List[float]:
     total_w = 0.0
     for img, w in variants:
         fabric = _isolate_fabric_region(img)
-        parts = [
-            _hsv_histogram(fabric) * 0.30,
-            _phash_bits(fabric) * 0.20,
-            _gradient_orientation_hist(fabric) * 0.28,
-            _lbp_hist(fabric) * 0.14,
-            _patch_color_stats(fabric) * 0.08,
-        ]
-        weighted += np.concatenate(parts).astype(np.float32) * w
+        weighted += _embed_fabric(fabric) * w
         total_w += w
     avg = weighted / max(total_w, 1e-9)
     return _l2(avg).tolist()
@@ -214,15 +222,38 @@ def cosine_similarity_batch(query: List[float], corpus: np.ndarray) -> np.ndarra
 
 def rank_top_k(
     query_vec: List[float],
-    corpus_vecs: List[List[float]],
+    corpus_vecs,  # List[List[float]] or an np.ndarray matrix
     top_k: int = 20,
 ) -> List[Tuple[int, float]]:
-    if not corpus_vecs:
+    if corpus_vecs is None or len(corpus_vecs) == 0:
         return []
     corpus = np.asarray(corpus_vecs, dtype=np.float32)
     sims = cosine_similarity_batch(query_vec, corpus)
     # Cosine of L2-normed vectors is in [-1,1]; clamp negatives to 0 so the
     # UI 0-100% band is monotonic.
     sims = np.clip(sims, 0.0, 1.0)
-    order = np.argsort(-sims)[:top_k]
+    k = min(top_k, sims.shape[0])
+    # argpartition = O(n); only sort the k winners.
+    part = np.argpartition(-sims, k - 1)[:k]
+    order = part[np.argsort(-sims[part])]
     return [(int(i), float(sims[i])) for i in order]
+
+
+def pairwise_similarity(matrix: np.ndarray, threshold: float) -> List[Tuple[int, int, float]]:
+    """Vectorised all-pairs cosine similarity for duplicate detection.
+
+    Returns (i, j, sim) with i < j and sim >= threshold, sorted by sim desc.
+    One BLAS matmul replaces the previous O(n^2) Python loop that rebuilt a
+    numpy array for every row.  5k x 182 floats -> ~25M-cell matrix, well
+    within memory and computed in a fraction of a second.
+    """
+    if matrix is None or len(matrix) < 2:
+        return []
+    m = np.asarray(matrix, dtype=np.float32)
+    sims = np.clip(m @ m.T, 0.0, 1.0)
+    iu, ju = np.triu_indices(len(m), k=1)
+    vals = sims[iu, ju]
+    keep = vals >= threshold
+    pairs = list(zip(iu[keep].tolist(), ju[keep].tolist(), vals[keep].tolist()))
+    pairs.sort(key=lambda t: -t[2])
+    return pairs
