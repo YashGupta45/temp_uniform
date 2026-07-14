@@ -345,7 +345,7 @@ async def search_similar(
 
     docs = await db.designs.find({}, {
         "_id": 0, "image": 0,  # image is heavy; we'll return only thumbnail
-    }).to_list(100000)
+    }).to_list(5000)
     if not docs:
         return []
 
@@ -424,7 +424,7 @@ async def related_designs(
     src = await db.designs.find_one({"id": design_id}, {"_id": 0})
     if not src or not src.get("embedding"):
         raise HTTPException(status_code=404, detail="Design not found")
-    docs = await db.designs.find({"id": {"$ne": design_id}}, {"_id": 0, "image": 0}).to_list(100000)
+    docs = await db.designs.find({"id": {"$ne": design_id}}, {"_id": 0, "image": 0}).to_list(5000)
     corpus = [d.get("embedding") or [] for d in docs]
     valid_idx = [i for i, v in enumerate(corpus) if v]
     corpus = [corpus[i] for i in valid_idx]
