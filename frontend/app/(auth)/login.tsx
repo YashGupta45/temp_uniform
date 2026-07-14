@@ -17,17 +17,11 @@ import { TxtInput } from "@/src/components/TxtInput";
 import { useAuth } from "@/src/context/AuthContext";
 import { COLORS, SPACING, TYPO } from "@/src/theme";
 
-const DEMO_ACCOUNTS = [
-  { role: "Admin", email: "admin@fabric.app", password: "Admin@123" },
-  { role: "Manager", email: "manager@fabric.app", password: "Manager@123" },
-  { role: "Employee", email: "employee@fabric.app", password: "Employee@123" },
-];
-
 export default function LoginScreen() {
   const { login } = useAuth();
   const router = useRouter();
-  const [email, setEmail] = useState("admin@fabric.app");
-  const [password, setPassword] = useState("Admin@123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [showPass, setShowPass] = useState(false);
@@ -44,11 +38,6 @@ export default function LoginScreen() {
     } finally {
       setBusy(false);
     }
-  };
-
-  const applyDemo = (a: (typeof DEMO_ACCOUNTS)[number]) => {
-    setEmail(a.email);
-    setPassword(a.password);
   };
 
   return (
@@ -120,31 +109,15 @@ export default function LoginScreen() {
               testID="login-submit-button"
               label={busy ? "Signing in..." : "Sign In"}
               onPress={submit}
-              disabled={busy}
+              disabled={busy || !email || !password}
               loading={busy}
               style={{ marginTop: SPACING.sm }}
             />
           </View>
 
-          <View style={styles.demoBlock}>
-            <Text style={styles.overline}>Demo accounts</Text>
-            {DEMO_ACCOUNTS.map((a) => (
-              <TouchableOpacity
-                key={a.email}
-                testID={`login-demo-${a.role.toLowerCase()}`}
-                style={styles.demoRow}
-                onPress={() => applyDemo(a)}
-                activeOpacity={0.7}
-              >
-                <View style={styles.demoDot} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.demoRole}>{a.role}</Text>
-                  <Text style={styles.demoEmail}>{a.email}</Text>
-                </View>
-                <Ionicons name="arrow-forward" size={18} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            ))}
-          </View>
+          <Text style={styles.helper}>
+            Ask your admin for login credentials.
+          </Text>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -172,20 +145,12 @@ const styles = StyleSheet.create({
     padding: 6,
   },
   err: { color: COLORS.danger, fontSize: 13, marginTop: 4 },
-  demoBlock: {
+  helper: {
     marginTop: SPACING.xl,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: SPACING.md,
-    backgroundColor: COLORS.surface,
+    textAlign: "center",
+    color: COLORS.textFaint,
+    fontSize: 12,
+    fontFamily: "Menlo",
+    letterSpacing: 0.6,
   },
-  overline: { ...TYPO.overline, marginBottom: SPACING.sm },
-  demoRow: {
-    flexDirection: "row", alignItems: "center", gap: SPACING.md,
-    paddingVertical: 10,
-    borderTopWidth: 1, borderTopColor: COLORS.border,
-  },
-  demoDot: { width: 6, height: 6, backgroundColor: COLORS.primary, borderRadius: 3 },
-  demoRole: { ...TYPO.body, fontWeight: "600" },
-  demoEmail: { ...TYPO.bodyMuted, fontSize: 12 },
 });

@@ -141,6 +141,12 @@ export default function AccountScreen() {
         {/* App actions */}
         <View style={styles.section}>
           <Text style={styles.overline}>Preferences</Text>
+          <ActionRow
+            testID="pref-change-password"
+            icon="key-outline"
+            label="Change password"
+            onPress={() => router.push("/(app)/change-password")}
+          />
           <ActionRow icon="notifications-outline" label="Notifications" muted testID="pref-notifications" />
           <ActionRow icon="cloud-download-outline" label="Offline sync (soon)" muted testID="pref-offline" />
           <ActionRow icon="information-circle-outline" label="About WEFT · AI" muted testID="pref-about" />

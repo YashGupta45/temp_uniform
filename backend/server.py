@@ -41,6 +41,7 @@ from models import (  # noqa: E402
     DuplicatePair,
     Favorite,
     FavoriteCreate,
+    PasswordChange,
     RecentSearch,
     SimilaritySearchRequest,
     TextSearchRequest,
@@ -166,6 +167,26 @@ async def register(
 @app.get("/api/auth/me", response_model=UserPublic)
 async def me(user: UserPublic = Depends(current_user)):
     return user
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    payload: PasswordChange,
+    user: UserPublic = Depends(current_user),
+):
+    doc = await db.users.find_one({"id": user.id})
+    if not doc or not verify_password(payload.current_password, doc["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    if payload.new_password == payload.current_password:
+        raise HTTPException(status_code=400, detail="New password must be different")
+    await db.users.update_one(
+        {"id": user.id},
+        {"$set": {
+            "hashed_password": hash_password(payload.new_password),
+            "seed_pwd_marker": "user-changed",
+        }},
+    )
+    return {"changed": True}
 
 
 @app.get("/api/auth/users", response_model=List[UserPublic])

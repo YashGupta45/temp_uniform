@@ -95,28 +95,31 @@ SEED_DESIGNS = [
 
 
 async def seed_all(db) -> None:
-    # ----------------- Admin ------------------
-    admin_email = os.environ.get("SEED_ADMIN_EMAIL", "admin@fabric.app")
-    admin_pass = os.environ.get("SEED_ADMIN_PASSWORD", "Admin@123")
+    # ----------------- Seed / rotate demo accounts ------------------
+    # We treat env-defined passwords as the source of truth.  If a user
+    # doesn't exist we create it.  If it does exist AND its current hash
+    # doesn't match the env password, we rotate the hash — this lets ops
+    # rotate passwords by changing .env and restarting.
+    demo_accounts = [
+        (os.environ.get("SEED_ADMIN_EMAIL", "admin@fabric.app"),
+         "Administrator",
+         os.environ.get("SEED_ADMIN_PASSWORD", "Admin@123"),
+         "admin"),
+        (os.environ.get("SEED_MANAGER_EMAIL", "manager@fabric.app"),
+         "Manager",
+         os.environ.get("SEED_MANAGER_PASSWORD", "Manager@123"),
+         "manager"),
+        (os.environ.get("SEED_EMPLOYEE_EMAIL", "employee@fabric.app"),
+         "Employee",
+         os.environ.get("SEED_EMPLOYEE_PASSWORD", "Employee@123"),
+         "employee"),
+    ]
 
-    existing = await db.users.find_one({"email": admin_email})
-    if not existing:
-        await db.users.insert_one({
-            "id": str(uuid.uuid4()),
-            "email": admin_email,
-            "name": "Administrator",
-            "hashed_password": hash_password(admin_pass),
-            "role": "admin",
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc),
-        })
+    from auth import verify_password  # local import to avoid cycles
 
-    # A manager & employee demo user (idempotent)
-    for email, name, pwd, role in [
-        ("manager@fabric.app", "Manager Demo", "Manager@123", "manager"),
-        ("employee@fabric.app", "Employee Demo", "Employee@123", "employee"),
-    ]:
-        if not await db.users.find_one({"email": email}):
+    for email, name, pwd, role in demo_accounts:
+        existing = await db.users.find_one({"email": email})
+        if not existing:
             await db.users.insert_one({
                 "id": str(uuid.uuid4()),
                 "email": email,
@@ -126,6 +129,28 @@ async def seed_all(db) -> None:
                 "is_active": True,
                 "created_at": datetime.now(timezone.utc),
             })
+        else:
+            # Rotate password only if it changed AND the account is still
+            # using the env-provided password (i.e. the operator asked us to
+            # rotate via .env).  If someone changed it through the in-app
+            # password-change screen, don't touch it.
+            marker = existing.get("seed_pwd_marker")
+            desired_marker = f"env:{pwd}"  # not stored plainly; only compared
+            if marker != desired_marker and not verify_password(pwd, existing["hashed_password"]):
+                # First run after .env rotation: update hash + marker.
+                await db.users.update_one(
+                    {"email": email},
+                    {"$set": {
+                        "hashed_password": hash_password(pwd),
+                        "seed_pwd_marker": desired_marker,
+                    }},
+                )
+            elif marker != desired_marker:
+                # Password already matches env; just record marker.
+                await db.users.update_one(
+                    {"email": email},
+                    {"$set": {"seed_pwd_marker": desired_marker}},
+                )
 
     # ----------------- Sample catalog + designs ------------------
     if await db.catalogs.count_documents({}) == 0:

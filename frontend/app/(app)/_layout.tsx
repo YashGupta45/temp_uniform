@@ -105,6 +105,7 @@ export default function AppLayout() {
       <Tabs.Screen name="admin/add-design" options={{ href: null }} />
       <Tabs.Screen name="admin/duplicates" options={{ href: null }} />
       <Tabs.Screen name="admin/users" options={{ href: null }} />
+      <Tabs.Screen name="change-password" options={{ href: null }} />
     </Tabs>
   );
 }
